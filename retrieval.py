@@ -9,9 +9,12 @@ import numpy as np
 import psycopg
 from scipy.constants import Boltzmann
 from scipy.integrate import quadrature as quad
+from scipy.optimize import minimize
 
 import disort
 import pyrt
+
+print(disort.disort.__doc__)
 
 ##############
 # IUVS data
@@ -34,7 +37,7 @@ files = sorted(Path(f'/media/kyle/Samsung_T5/IUVS_data/orbit0{3700}').glob(f'*ap
 hdul = fits.open(files[file])
 
 # Load in the reflectance and the wavelengths
-# TODO: reflectance
+reflectance = [0]
 # TODO: wavelengths properly
 wavelengths = hdul['observation'].data['wavelength'][0, 0] / 1000  # convert to microns
 
@@ -46,14 +49,17 @@ solar_zenith_angle = pixelgeometry['pixel_solar_zenith_angle']
 emission_angle = pixelgeometry['pixel_emission_angle']
 phase_angle = pixelgeometry['pixel_phase_angle']
 data_ls = hdul['observation'].data['solar_longitude']
-solar_zenith_angle = np.where(solar_zenith_angle <= 90, solar_zenith_angle, 0)
 
 # Get the corresponding l1c file
 ref = np.load(f'/home/kyle/ql_testing/reflectance{orbit}-{file}.npy')
-print(ref.shape)
 
+# Make the azimuth angles
+solar_zenith_angle_mask = np.where(solar_zenith_angle <= 90, True, False)
+solar_zenith_angle = np.where(solar_zenith_angle <= 90, solar_zenith_angle, 0)
 azimuth = pyrt.azimuth(solar_zenith_angle, emission_angle, phase_angle)
-print(azimuth.shape)
+
+mu0 = np.cos(np.radians(solar_zenith_angle))
+mu = np.cos(np.radians(emission_angle))
 
 ##############
 # Ames GCM
@@ -84,20 +90,34 @@ yearly_idx = np.argmin(np.abs(yearly_gcm.variables['time'][:] - 10000 - sol))
 # Aerosol radprop
 ##############
 # Dust
-'''dust_cext = np.load('/home/kyle/repos/paper3/radprop/mars_dust/extinction_cross_section.npy')  # (24, 317)
-dust_csca = np.load('/home/kyle/repos/paper3/radprop/mars_dust/scattering_cross_section.npy')  # (24, 317)
-dust_pmom = np.load('/home/kyle/repos/paper3/radprop/mars_dust/legendre_coefficients.npy')  # (129, 24, 317)
-dust_wavelengths = np.load('/home/kyle/repos/paper3/radprop/mars_dust/wavelengths.npy')
-dust_particle_sizes = np.load('/home/kyle/repos/paper3/radprop/mars_dust/particle_sizes.npy')
+dust_cext = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_dust/extinction_cross_section.npy')  # (24, 317)
+dust_csca = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_dust/scattering_cross_section.npy')  # (24, 317)
+dust_pmom = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_dust/legendre_coefficients.npy')  # (129, 24, 317)
+dust_wavelengths = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_dust/wavelengths.npy')
+dust_particle_sizes = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_dust/particle_sizes.npy')
 
 # Ice. TODO: use better properties
-ice_cext = np.load('/home/kyle/repos/paper3/radprop/mars_ice/extinction_cross_section.npy')  # (24, 317)
-ice_csca = np.load('/home/kyle/repos/paper3/radprop/mars_ice/scattering_cross_section.npy')  # (24, 317)
+ice_cext = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_ice/extinction_cross_section.npy')  # (24, 317)
+ice_csca = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_ice/scattering_cross_section.npy')  # (24, 317)
 #ice_pmom = np.load('/home/kyle/repos/paper3/radprop/mars_dust/legendre_coefficients.npy')  # (129, 24, 317)
-ice_g = np.load('/home/kyle/repos/paper3/radprop/mars_ice/asymmetry_parameter.npy')
-ice_wavelengths = np.load('/home/kyle/repos/paper3/radprop/mars_ice/wavelengths.npy')
-ice_particle_sizes = np.load('/home/kyle/repos/paper3/radprop/mars_ice/particle_sizes.npy')
-ice_pmom = pyrt.decompose_hg(ice_g, 129)'''
+ice_g = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_ice/asymmetry_parameter.npy')
+ice_wavelengths = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_ice/wavelengths.npy')
+ice_particle_sizes = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_ice/particle_sizes.npy')
+ice_pmom = pyrt.decompose_hg(ice_g, 129)
+
+
+##############
+# Surface arrays
+##############
+n_streams = 16
+n_polar = 1    # defined by IUVS' viewing geometry
+n_azimuth = 1    # defined by IUVS' viewing geometry
+
+bemst = np.zeros(int(0.5*n_streams))
+emust = np.zeros(n_polar)
+rho_accurate = np.zeros((n_polar, n_azimuth))
+rhoq = np.zeros((int(0.5 * n_streams), int(0.5 * n_streams + 1), n_streams))
+rhou = np.zeros((n_streams, int(0.5 * n_streams + 1), n_streams))
 
 
 def column_density(pressure_profile, temperature_profile, altitude, profargs, tempargs):
@@ -152,13 +172,12 @@ def linear_grid_profile(altitude, altitude_grid, profile_grid) -> np.ndarray:
     return np.interp(altitude, np.flip(altitude_grid), profile_grid)
 
 
-##############
-# Lat/lon grid
-##############
-# Use NN to get a 1D temperature profile
-
-
 def retrieval(integration: int, spatial_bin: int):
+    # Exit if the angles are not retrievable
+    #if not solar_zenith_angle_mask[integration, spatial_bin] or solar_zenith_angle[integration, spatial_bin] >= 72 or emission_angle[integration, spatial_bin] >= 72:
+    #    answer = np.zeros((2, 19)) * np.nan
+    #    return integration, spatial_bin, answer
+
     ##############
     # Equation of state
     ##############
@@ -185,7 +204,7 @@ def retrieval(integration: int, spatial_bin: int):
     z = -np.log(pixel_pressure / sfc_pressure) * 10
 
     # Finally, use these to compute the column density in each "good" layer
-    colden = column_density(linear_grid_profile, linear_grid_profile, z, (z, pixel_pressure), (z, pixel_temperature))[:-bads]
+    colden = np.flip(column_density(linear_grid_profile, linear_grid_profile, z, (z, pixel_pressure), (z, pixel_temperature)))[:-bads]  # flip so TOA is first
 
     ##############
     # Rayleigh scattering
@@ -193,14 +212,111 @@ def retrieval(integration: int, spatial_bin: int):
     rayleigh_scattering_optical_depth = pyrt.rayleigh_co2_optical_depth(colden, wavelengths)
     rayleigh_ssa = np.ones((rayleigh_scattering_optical_depth.shape))
     rayleigh_pmom = pyrt.rayleigh_legendre(rayleigh_scattering_optical_depth.shape[0], wavelengths.shape[0])
+    rayleigh_column = pyrt.Column(rayleigh_scattering_optical_depth, rayleigh_ssa, rayleigh_pmom)
 
     ##############
     # Aerosol vertical profiles
     ##############
-    dust_vprof = gcm_dust_vprof[yearly_idx, :, lat_idx, lon_idx]
-    ice_vprof = gcm_ice_vprof[yearly_idx, :, lat_idx, lon_idx]
+    dust_vprof = gcm_dust_vprof[yearly_idx, :-bads, lat_idx, lon_idx]
+    ice_vprof = gcm_ice_vprof[yearly_idx, :-bads, lat_idx, lon_idx]
 
+    ##############
+    # Surface
+    ##############
+    clancy = np.linspace(0.01, 0.015, num=100)
+    clancy_wavs = np.linspace(0.2, 0.3, num=100)
+    sfc = np.interp(wavelengths, clancy_wavs, clancy)
+
+    wavelength_indices = [0, 1, 2, -3, -2, -1]
+
+    def simulate_tau(guess: np.ndarray) -> float:
+        dust_guess = guess[0]
+        ice_guess = guess[1]
+
+        simulated_toa_reflectance = np.zeros((6,))
+
+        for counter, wav_index in enumerate(wavelength_indices):
+            ##############
+            # Dust FSP
+            ##############
+            dust_extinction = pyrt.extinction_ratio_grid(dust_cext, dust_particle_sizes, dust_wavelengths, wavelengths[wav_index])
+            dust_reff_grid = np.linspace(1.4, 1.6, num=100)
+            dust_z_reff = np.linspace(100, 0, num=100)
+            dust_reff = np.interp(z[:-bads-1], dust_z_reff, dust_reff_grid)   # The "bad" altitudes don't get assigned a particle size
+
+            dust_extinction_grid = pyrt.regrid(dust_extinction, dust_particle_sizes, dust_wavelengths, dust_reff, wavelengths)
+
+            dust_od = pyrt.optical_depth(dust_vprof, colden, dust_extinction_grid, dust_guess)
+            dust_ssa = pyrt.regrid(dust_csca / dust_cext, dust_particle_sizes, dust_wavelengths, dust_reff, wavelengths)
+            dust_legendre = pyrt.regrid(dust_pmom, dust_particle_sizes, dust_wavelengths, dust_reff, wavelengths)
+            dust_column = pyrt.Column(dust_od, dust_ssa, dust_legendre)
+
+            ##############
+            # Ice FSP
+            ##############
+            ice_extinction = pyrt.extinction_ratio_grid(ice_cext, ice_particle_sizes, ice_wavelengths, wavelengths[wav_index])
+            ice_reff_grid = np.linspace(1.5, 4, num=100)
+            ice_z_reff = np.linspace(100, 0, num=100)
+            ice_reff = np.interp(z[:-bads-1], ice_z_reff, ice_reff_grid)   # The "bad" altitudes don't get assigned a particle size
+
+            ice_extinction_grid = pyrt.regrid(ice_extinction, ice_particle_sizes, ice_wavelengths, ice_reff, wavelengths)
+
+            ice_od = pyrt.optical_depth(ice_vprof, colden, ice_extinction_grid, ice_guess)
+            ice_ssa = pyrt.regrid(ice_csca / ice_cext, ice_particle_sizes, ice_wavelengths, ice_reff, wavelengths)
+            ice_asym = pyrt.regrid(ice_g, ice_particle_sizes, ice_wavelengths, ice_reff, wavelengths)
+            ice_legendre = pyrt.decompose_hg(ice_asym, 129)
+            ice_column = pyrt.Column(ice_od, ice_ssa, ice_legendre)
+
+            ##############
+            # Total atmosphere
+            ##############
+            atm = rayleigh_column + dust_column + ice_column
+
+            ##############
+            # Output arrays
+            ##############
+            n_user_levels = atm.optical_depth.shape[0] + 1
+            albedo_medium = np.zeros(n_polar)
+            diffuse_up_flux = np.zeros(n_user_levels)
+            diffuse_down_flux = np.zeros(n_user_levels)
+            direct_beam_flux = np.zeros(n_user_levels)
+            flux_divergence = np.zeros(n_user_levels)
+            intensity = np.zeros((n_polar, n_user_levels, n_azimuth))
+            mean_intensity = np.zeros(n_user_levels)
+            transmissivity_medium = np.zeros(n_polar)
+
+            # Misc
+            user_od_output = np.zeros(n_user_levels)
+            temper = np.zeros(n_user_levels)
+            h_lyr = np.zeros(n_user_levels)
+            ##############
+            # Call DISORT
+            ##############
+
+            print(atm.legendre_coefficients[:, :, wav_index])
+
+            rfldir, rfldn, flup, dfdt, uavg, uu, albmed, trnmed = \
+                disort.disort(True, False, False, False, [False, False, False, False, False],
+                              False, True, True, False,
+                              atm.optical_depth[:, wav_index],
+                              atm.single_scattering_albedo[:, wav_index],
+                              atm.legendre_coefficients[:, :, wav_index],
+                              temper, 1, 1, user_od_output,
+                              mu0[integration, spatial_bin], 0,
+                              mu[integration, spatial_bin], azimuth[integration, spatial_bin],
+                              np.pi, 0, sfc[wav_index], 0, 0, 1, 3400000, h_lyr,
+                              rhoq, rhou, rho_accurate, bemst, emust,
+                              0, '', direct_beam_flux,
+                              diffuse_down_flux, diffuse_up_flux, flux_divergence,
+                              mean_intensity, intensity, albedo_medium,
+                              transmissivity_medium, maxcmu=n_streams, maxulv=n_user_levels, maxmom=128)
+            simulated_toa_reflectance[counter] = uu[0, 0, 0]
+
+        return np.sum((simulated_toa_reflectance - reflectance[integration, spatial_bin, wavelength_indices])**2)
+
+    fitted_optical_depth = minimize(simulate_tau, np.array([0.4, 0.5]), method='Nelder-Mead').x
+    print(fitted_optical_depth)
+    return integration, spatial_bin, np.array(fitted_optical_depth)
 
 
 retrieval(100, 50)
-
