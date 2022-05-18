@@ -2,6 +2,8 @@ import time
 import os
 from pathlib import Path
 import multiprocessing as mp
+import math
+from tempfile import mkdtemp
 
 from astropy.io import fits
 from netCDF4 import Dataset
@@ -10,37 +12,40 @@ import psycopg
 from scipy.constants import Boltzmann
 from scipy.integrate import quadrature as quad
 from scipy.optimize import minimize
+from scipy.io import readsav
 
 import disort
 import pyrt
-
-print(disort.disort.__doc__)
 
 ##############
 # IUVS data
 ##############
 
 # Load in all the info from the given file
-orbit: int = 3751
-file: int = 0
+orbit: int = 3464
+file: int = 5
+block = math.floor(orbit / 100) * 100
 
+# Connect to the DB to get the time of year of the orbit
 with psycopg.connect(host='localhost', dbname='iuvs', user='kyle',
                      password='iuvs') as connection:
-    # I still need Mars year, Sol
-    # Open a cursor for db operations
     with connection.cursor() as cursor:
         cursor.execute(f"select sol from apoapse where orbit = {orbit}")
         sol = cursor.fetchall()[0][0]
 
 # Get the l1b file
-files = sorted(Path(f'/media/kyle/Samsung_T5/IUVS_data/orbit0{3700}').glob(f'*apoapse*{orbit}*muv*.gz'))
-hdul = fits.open(files[file])
+l1b_files = sorted(Path(f'/media/kyle/Samsung_T5/IUVS_data/orbit0{block}').glob(f'*apoapse*{orbit}*muv*.gz'))
+hdul = fits.open(l1b_files[file])
 
-# Load in the reflectance and the wavelengths
-reflectance = [0]
-# TODO: wavelengths properly
-wavelengths = hdul['observation'].data['wavelength'][0, 0] / 1000  # convert to microns
+# Load in the reflectance
+reflectance_files = sorted(Path(f'/home/kyle/iuvs/reflectance/orbit0{block}').glob('*'))
+reflectance = np.load(reflectance_files[file])
 
+# Load in the corrected wavelengths
+wavelengths_files = sorted(Path(f'/home/kyle/Downloads/mvn_iuv_wl_apoapse-orbit0{orbit}-muv').glob('*.sav'))
+wavelengths = readsav(wavelengths_files[file])['wavelength_muv'] / 1000  # convert to microns
+
+# Get the data from the l1b file
 pixelgeometry = hdul['pixelgeometry'].data
 latitude = pixelgeometry['pixel_corner_lat']
 longitude = pixelgeometry['pixel_corner_lon']
@@ -50,11 +55,8 @@ emission_angle = pixelgeometry['pixel_emission_angle']
 phase_angle = pixelgeometry['pixel_phase_angle']
 data_ls = hdul['observation'].data['solar_longitude']
 
-# Get the corresponding l1c file
-ref = np.load(f'/home/kyle/ql_testing/reflectance{orbit}-{file}.npy')
-
 # Make the azimuth angles
-solar_zenith_angle_mask = np.where(solar_zenith_angle <= 90, True, False)
+solar_zenith_angle_good = np.where(solar_zenith_angle <= 90, True, False)
 solar_zenith_angle = np.where(solar_zenith_angle <= 90, solar_zenith_angle, 0)
 azimuth = pyrt.azimuth(solar_zenith_angle, emission_angle, phase_angle)
 
@@ -174,9 +176,11 @@ def linear_grid_profile(altitude, altitude_grid, profile_grid) -> np.ndarray:
 
 def retrieval(integration: int, spatial_bin: int):
     # Exit if the angles are not retrievable
-    #if not solar_zenith_angle_mask[integration, spatial_bin] or solar_zenith_angle[integration, spatial_bin] >= 72 or emission_angle[integration, spatial_bin] >= 72:
-    #    answer = np.zeros((2, 19)) * np.nan
-    #    return integration, spatial_bin, answer
+    if (not solar_zenith_angle_good[integration, spatial_bin]) or solar_zenith_angle[integration, spatial_bin] >= 72 or emission_angle[integration, spatial_bin] >= 72:
+        answer = np.zeros((2,)) * np.nan
+        return integration, spatial_bin, answer
+
+    pixel_wavs = wavelengths[spatial_bin, :]
 
     ##############
     # Equation of state
@@ -209,9 +213,10 @@ def retrieval(integration: int, spatial_bin: int):
     ##############
     # Rayleigh scattering
     ##############
-    rayleigh_scattering_optical_depth = pyrt.rayleigh_co2_optical_depth(colden, wavelengths)
-    rayleigh_ssa = np.ones((rayleigh_scattering_optical_depth.shape))
-    rayleigh_pmom = pyrt.rayleigh_legendre(rayleigh_scattering_optical_depth.shape[0], wavelengths.shape[0])
+    rayleigh_scattering_optical_depth = pyrt.rayleigh_co2_optical_depth(colden, pixel_wavs)
+    rayleigh_ssa = np.ones(rayleigh_scattering_optical_depth.shape)
+    rayleigh_pmom = pyrt.rayleigh_legendre(rayleigh_scattering_optical_depth.shape[0], pixel_wavs.shape[0])
+
     rayleigh_column = pyrt.Column(rayleigh_scattering_optical_depth, rayleigh_ssa, rayleigh_pmom)
 
     ##############
@@ -239,31 +244,31 @@ def retrieval(integration: int, spatial_bin: int):
             ##############
             # Dust FSP
             ##############
-            dust_extinction = pyrt.extinction_ratio_grid(dust_cext, dust_particle_sizes, dust_wavelengths, wavelengths[wav_index])
+            dust_extinction = pyrt.extinction_ratio_grid(dust_cext, dust_particle_sizes, dust_wavelengths, pixel_wavs[wav_index])
             dust_reff_grid = np.linspace(1.4, 1.6, num=100)
             dust_z_reff = np.linspace(100, 0, num=100)
             dust_reff = np.interp(z[:-bads-1], dust_z_reff, dust_reff_grid)   # The "bad" altitudes don't get assigned a particle size
 
-            dust_extinction_grid = pyrt.regrid(dust_extinction, dust_particle_sizes, dust_wavelengths, dust_reff, wavelengths)
+            dust_extinction_grid = pyrt.regrid(dust_extinction, dust_particle_sizes, dust_wavelengths, dust_reff, pixel_wavs)
 
             dust_od = pyrt.optical_depth(dust_vprof, colden, dust_extinction_grid, dust_guess)
-            dust_ssa = pyrt.regrid(dust_csca / dust_cext, dust_particle_sizes, dust_wavelengths, dust_reff, wavelengths)
-            dust_legendre = pyrt.regrid(dust_pmom, dust_particle_sizes, dust_wavelengths, dust_reff, wavelengths)
+            dust_ssa = pyrt.regrid(dust_csca / dust_cext, dust_particle_sizes, dust_wavelengths, dust_reff, pixel_wavs)
+            dust_legendre = pyrt.regrid(dust_pmom, dust_particle_sizes, dust_wavelengths, dust_reff, pixel_wavs)
             dust_column = pyrt.Column(dust_od, dust_ssa, dust_legendre)
 
             ##############
             # Ice FSP
             ##############
-            ice_extinction = pyrt.extinction_ratio_grid(ice_cext, ice_particle_sizes, ice_wavelengths, wavelengths[wav_index])
+            ice_extinction = pyrt.extinction_ratio_grid(ice_cext, ice_particle_sizes, ice_wavelengths, pixel_wavs[wav_index])
             ice_reff_grid = np.linspace(1.5, 4, num=100)
             ice_z_reff = np.linspace(100, 0, num=100)
             ice_reff = np.interp(z[:-bads-1], ice_z_reff, ice_reff_grid)   # The "bad" altitudes don't get assigned a particle size
 
-            ice_extinction_grid = pyrt.regrid(ice_extinction, ice_particle_sizes, ice_wavelengths, ice_reff, wavelengths)
+            ice_extinction_grid = pyrt.regrid(ice_extinction, ice_particle_sizes, ice_wavelengths, ice_reff, pixel_wavs)
 
             ice_od = pyrt.optical_depth(ice_vprof, colden, ice_extinction_grid, ice_guess)
-            ice_ssa = pyrt.regrid(ice_csca / ice_cext, ice_particle_sizes, ice_wavelengths, ice_reff, wavelengths)
-            ice_asym = pyrt.regrid(ice_g, ice_particle_sizes, ice_wavelengths, ice_reff, wavelengths)
+            ice_ssa = pyrt.regrid(ice_csca / ice_cext, ice_particle_sizes, ice_wavelengths, ice_reff, pixel_wavs)
+            ice_asym = pyrt.regrid(ice_g, ice_particle_sizes, ice_wavelengths, ice_reff, pixel_wavs)
             ice_legendre = pyrt.decompose_hg(ice_asym, 129)
             ice_column = pyrt.Column(ice_od, ice_ssa, ice_legendre)
 
@@ -293,8 +298,6 @@ def retrieval(integration: int, spatial_bin: int):
             # Call DISORT
             ##############
 
-            print(atm.legendre_coefficients[:, :, wav_index])
-
             rfldir, rfldn, flup, dfdt, uavg, uu, albmed, trnmed = \
                 disort.disort(True, False, False, False, [False, False, False, False, False],
                               False, True, True, False,
@@ -314,9 +317,44 @@ def retrieval(integration: int, spatial_bin: int):
 
         return np.sum((simulated_toa_reflectance - reflectance[integration, spatial_bin, wavelength_indices])**2)
 
-    fitted_optical_depth = minimize(simulate_tau, np.array([0.4, 0.5]), method='Nelder-Mead').x
+    fitted_optical_depth = minimize(simulate_tau, np.array([0.4, 0.5]), method='Nelder-Mead', bounds=((0, 2), (0, 2))).x
     print(fitted_optical_depth)
     return integration, spatial_bin, np.array(fitted_optical_depth)
 
 
-retrieval(100, 50)
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Make a shared array
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+memmap_filename_dust = os.path.join(mkdtemp(), 'myNewFileDust.dat')
+memmap_filename_ice = os.path.join(mkdtemp(), 'myNewFileIce.dat')
+retrieved_dust = np.memmap(memmap_filename_dust, dtype=float,
+                           shape=reflectance.shape[:-1], mode='w+')
+retrieved_ice = np.memmap(memmap_filename_ice, dtype=float,
+                           shape=reflectance.shape[:-1], mode='w+')
+
+
+def make_answer(inp):
+    integration = inp[0]
+    position = inp[1]
+    answer = inp[2]
+    retrieved_dust[integration, position] = answer[0]
+    retrieved_ice[integration, position] = answer[1]
+
+
+t0 = time.time()
+n_cpus = mp.cpu_count()    # = 8 for my desktop, 12 for my laptop
+pool = mp.Pool(n_cpus - 2)   # save one/two just to be safe. Some say it's faster
+
+# NOTE: if there are any issues in the argument of apply_async (here,
+# retrieve_ssa), it'll break out of that and move on to the next iteration.
+#for integ in range(reflectance.shape[0]):
+for integ in range(10):
+    for posit in range(reflectance.shape[1]):
+        pool.apply_async(retrieval, args=(integ, posit), callback=make_answer)
+# https://www.machinelearningplus.com/python/parallel-processing-python/
+pool.close()
+pool.join()  # I guess this postpones further code execution until the queue is finished
+np.save(f'/home/kyle/iuvs/retrievals/orbit03400/orbit{orbit}-{file}-dust.npy', retrieved_dust)
+np.save(f'/home/kyle/iuvs/retrievals/orbit03400/orbit{orbit}-{file}-ice.npy', retrieved_ice)
+t1 = time.time()
+print(t1-t0)    # It takes 17.6 hours for 133 positions, 170 integrations
