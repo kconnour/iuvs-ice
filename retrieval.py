@@ -23,12 +23,11 @@ import pyrt
 
 # Load in all the info from the given file
 orbit: int = 3464
-file: int = 5
+file: int = 4
 block = math.floor(orbit / 100) * 100
 
 # Connect to the DB to get the time of year of the orbit
-with psycopg.connect(host='localhost', dbname='iuvs', user='kyle',
-                     password='iuvs') as connection:
+with psycopg.connect(host='localhost', dbname='iuvs', user='kyle', password='iuvs') as connection:
     with connection.cursor() as cursor:
         cursor.execute(f"select sol from apoapse where orbit = {orbit}")
         sol = cursor.fetchall()[0][0]
@@ -106,7 +105,6 @@ ice_g = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_ice/asymmetry_parameter.
 ice_wavelengths = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_ice/wavelengths.npy')
 ice_particle_sizes = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_ice/particle_sizes.npy')
 ice_pmom = pyrt.decompose_hg(ice_g, 129)
-
 
 ##############
 # Surface arrays
@@ -317,7 +315,7 @@ def retrieval(integration: int, spatial_bin: int):
 
         return np.sum((simulated_toa_reflectance - reflectance[integration, spatial_bin, wavelength_indices])**2)
 
-    fitted_optical_depth = minimize(simulate_tau, np.array([0.4, 0.5]), method='Nelder-Mead', bounds=((0, 2), (0, 2))).x
+    fitted_optical_depth = minimize(simulate_tau, np.array([0.4, 0.2]), method='Nelder-Mead', bounds=((0, 2), (0, 5))).x
     print(fitted_optical_depth)
     return integration, spatial_bin, np.array(fitted_optical_depth)
 
@@ -348,7 +346,8 @@ pool = mp.Pool(n_cpus - 2)   # save one/two just to be safe. Some say it's faste
 # NOTE: if there are any issues in the argument of apply_async (here,
 # retrieve_ssa), it'll break out of that and move on to the next iteration.
 #for integ in range(reflectance.shape[0]):
-for integ in range(10):
+# TODO: UPDATE THIS TO RUN OVER THE FULL RANGE OF INTEGRATIONS
+for integ in range(reflectance.shape[0]):
     for posit in range(reflectance.shape[1]):
         pool.apply_async(retrieval, args=(integ, posit), callback=make_answer)
 # https://www.machinelearningplus.com/python/parallel-processing-python/
@@ -357,4 +356,4 @@ pool.join()  # I guess this postpones further code execution until the queue is 
 np.save(f'/home/kyle/iuvs/retrievals/orbit03400/orbit{orbit}-{file}-dust.npy', retrieved_dust)
 np.save(f'/home/kyle/iuvs/retrievals/orbit03400/orbit{orbit}-{file}-ice.npy', retrieved_ice)
 t1 = time.time()
-print(t1-t0)    # It takes 17.6 hours for 133 positions, 170 integrations
+print(t1-t0)
