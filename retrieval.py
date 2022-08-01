@@ -23,7 +23,7 @@ import pyrt
 
 # Load in all the info from the given file
 orbit: int = 3464
-file: int = 4
+file: int = 7
 block = math.floor(orbit / 100) * 100
 
 # Connect to the DB to get the time of year of the orbit
@@ -41,7 +41,7 @@ reflectance_files = sorted(Path(f'/home/kyle/iuvs/reflectance/orbit0{block}').gl
 reflectance = np.load(reflectance_files[file])
 
 # Load in the corrected wavelengths
-wavelengths_files = sorted(Path(f'/home/kyle/Downloads/mvn_iuv_wl_apoapse-orbit0{orbit}-muv').glob('*.sav'))
+wavelengths_files = sorted(Path(f'/home/kyle/iuvs/wavelengths/orbit0{block}/mvn_iuv_wl_apoapse-orbit0{orbit}-muv').glob('*.sav'))
 wavelengths = readsav(wavelengths_files[file])['wavelength_muv'] / 1000  # convert to microns
 
 # Get the data from the l1b file
