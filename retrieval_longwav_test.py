@@ -13,8 +13,7 @@ from scipy.constants import Boltzmann
 from scipy.integrate import quadrature as quad
 from scipy.optimize import minimize
 from scipy.io import readsav
-
-import matplotlib.pyplot as plt
+from scipy.interpolate import interpn
 
 import disort
 import pyrt
@@ -31,7 +30,7 @@ lamber = True
 
 # Load in all the info from the given file
 orbit: int = 3467
-file: int = 7
+file: int = 8
 block = math.floor(orbit / 100) * 100
 
 # Connect to the DB to get the time of year of the orbit
@@ -46,7 +45,7 @@ hdul = fits.open(l1b_files[file])
 
 # Load in the reflectance
 ff = np.load('/home/kyle/repos/PyUVS/pyuvs/anc/flatfields/mid-hi-res-flatfield-update.npy')
-reflectance_files = sorted(Path(f'/home/kyle/iuvs/reflectance/orbit0{block}').glob('*nonlinear-solstice*'))
+reflectance_files = sorted(Path(f'/home/kyle/iuvs/reflectance/orbit0{block}').glob(f'reflectance{orbit}*nonlinear-solstice*'))
 reflectance = np.load(reflectance_files[file]) / ff * 1/1.18
 
 # Load in the corrected wavelengths
@@ -95,6 +94,13 @@ gcm_local_time = gcm.variables['time_of_day_24'][:]
 
 season_idx = np.argmin(np.abs(gcm_season - 10000 - sol))
 yearly_idx = np.argmin(np.abs(yearly_gcm.variables['time'][:] - 10000 - sol))
+
+##############
+# Surface albedo map
+##############
+band6 = fits.open('/home/kyle/repos/iuvs-ice/map/band6_w.fits')['primary'].data
+band7 = fits.open('/home/kyle/repos/iuvs-ice/map/band7_w.fits')['primary'].data
+hapke_w = np.dstack((band6, band7))
 
 ##############
 # Aerosol radprop
@@ -262,7 +268,11 @@ def retrieval(integration: int, spatial_bin: int):
 
     # For Hapke HG2. The idea is the make arrays that are (n_wavelengths, array_shape). This way I can compute them once for each wavelength
     # and each pixel, and then just call them once.
-    wolff_hapke = np.interp(pixel_wavs, np.linspace(0.258, 0.32, num=100), np.linspace(0.06, 0.08, num=100))
+    #wolff_hapke = np.interp(pixel_wavs, np.linspace(0.258, 0.32, num=100), np.linspace(0.06, 0.08, num=100))
+    wolff_hapke = np.array([interpn((np.linspace(-90, 90, num=180),
+                           np.linspace(0, 360, num=360), np.array([0.26, 0.32])),
+                           hapke_w, np.array([pixel_lat, pixel_lon, f]), bounds_error=False,
+                           fill_value=None)[0] for f in pixel_wavs])
     bemst = np.zeros((19,) + bemst_empty.shape)
     emust = np.zeros((19,) + emust_empty.shape)
     rho_accurate = np.zeros((19,) + rho_accurate_empty.shape)
@@ -272,7 +282,7 @@ def retrieval(integration: int, spatial_bin: int):
     # Make the surface arrays just once for Hapke HG2
     if not lamber:
         for counter, foobar in enumerate(wolff_hapke):
-            brdf_arg = np.array([0.8, 0.06, foobar, 0.3, 0.45, 20])  # From Wolff2010
+            #brdf_arg = np.array([0.8, 0.06, foobar, 0.3, 0.45, 20])  # From Wolff2010
             brdf_arg = np.array([1, 0.06, foobar, 0.3, 0.7, 20])  # From Wolff2019
             _rhoq, _rhou, _emust, _bemst, _rho_accurate = \
                 disort.disobrdf(True, mu[integration, spatial_bin], np.pi, mu0[integration, spatial_bin], False, 0.01, False,
@@ -289,10 +299,16 @@ def retrieval(integration: int, spatial_bin: int):
     #wavelength_indices = [-5, -4, -3, -2]
 
     def simulate_tau(guess: np.ndarray) -> np.ndarray:
+        #print(f'guess = {guess}')
         dust_guess = guess[0]
         ice_guess = guess[1]
 
         simulated_toa_reflectance = np.zeros(len(wavelength_indices))
+
+        # This is a hack to add bounds to the solver
+        if np.any(guess < 0):
+            simulated_toa_reflectance[:] = 999999
+            return simulated_toa_reflectance
 
         for counter, wav_index in enumerate(wavelength_indices):
             ##############
@@ -389,17 +405,17 @@ def retrieval(integration: int, spatial_bin: int):
 
     def find_best_fit(guess: np.ndarray):
         simulated_toa_reflectance = simulate_tau(guess)
-        #print(f'{reflectance[integration, spatial_bin, wavelength_indices]} \n'
-        #      f'{simulated_toa_reflectance} \n'
-        #      f'{guess}')
+        print(f'{reflectance[integration, spatial_bin, wavelength_indices]} \n'
+              f'{simulated_toa_reflectance} \n'
+              f'{guess}')
         return np.sum((simulated_toa_reflectance - reflectance[integration, spatial_bin, wavelength_indices])**2)
 
-    fitted_optical_depth = minimize(find_best_fit, np.array([0.5, 0.2]), method='Nelder-Mead', tol=0.001, bounds=((0, 2), (0, 0.5))).x
+    fitted_optical_depth = minimize(find_best_fit, np.array([0.7, 0.2]), method='Powell', bounds=((0, 2), (0, 1))).x
     solution = np.array(fitted_optical_depth)
     sim = simulate_tau(solution)
     chi_squared = np.sum((reflectance[integration, spatial_bin, wavelength_indices] - sim)**2 / sim)
+    print(f'chisq = {chi_squared}')
     print(f'answer={fitted_optical_depth}')
-    #raise SystemExit(9)
     return integration, spatial_bin, solution, chi_squared
 
 
@@ -429,23 +445,19 @@ def make_answer(inp):
 
 t0 = time.time()
 n_cpus = mp.cpu_count()    # = 8 for my desktop, 12 for my laptop
-pool = mp.Pool(n_cpus - 2)   # save one/two just to be safe. Some say it's faster
+pool = mp.Pool(n_cpus - 1)   # save one/two just to be safe. Some say it's faster
 
 # NOTE: if there are any issues in the argument of apply_async (here,
 # retrieve_ssa), it'll break out of that and move on to the next iteration.
-# TODO: UPDATE THIS TO RUN OVER THE FULL RANGE OF INTEGRATIONS
 for integ in range(reflectance.shape[0]):
-#for integ in [35, 36, 37, 38]:
-#for integ in [0, 1, 2, 3]:
     for posit in range(reflectance.shape[1]):
-    #for posit in [75]:
         pool.apply_async(retrieval, args=(integ, posit), callback=make_answer)
         #retrieval(integ, posit)
 # https://www.machinelearningplus.com/python/parallel-processing-python/
 pool.close()
 pool.join()  # I guess this postpones further code execution until the queue is finished
-np.save(f'/home/kyle/iuvs/retrievals/orbit03400/long/orbit{orbit}-{file}-dust.npy', retrieved_dust)
-np.save(f'/home/kyle/iuvs/retrievals/orbit03400/long/orbit{orbit}-{file}-ice.npy', retrieved_ice)
-np.save(f'/home/kyle/iuvs/retrievals/orbit03400/long/orbit{orbit}-{file}-chi_squared.npy', retrieved_chi_squared)
+np.save(f'/home/kyle/iuvs/retrievals/orbit0{block}/orbit{orbit}-{file}-dust.npy', retrieved_dust)
+np.save(f'/home/kyle/iuvs/retrievals/orbit0{block}/orbit{orbit}-{file}-ice.npy', retrieved_ice)
+np.save(f'/home/kyle/iuvs/retrievals/orbit0{block}/orbit{orbit}-{file}-chi_squared.npy', retrieved_chi_squared)
 t1 = time.time()
 print(t1-t0)
