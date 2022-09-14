@@ -30,7 +30,7 @@ lamber = True
 
 # Load in all the info from the given file
 orbit: int = 3467
-file: int = 8
+file: int = 9
 block = math.floor(orbit / 100) * 100
 
 # Connect to the DB to get the time of year of the orbit
@@ -45,8 +45,8 @@ hdul = fits.open(l1b_files[file])
 
 # Load in the reflectance
 ff = np.load('/home/kyle/repos/PyUVS/pyuvs/anc/flatfields/mid-hi-res-flatfield-update.npy')
-reflectance_files = sorted(Path(f'/home/kyle/iuvs/reflectance/orbit0{block}').glob(f'reflectance{orbit}*nonlinear-solstice*'))
-reflectance = np.load(reflectance_files[file]) / ff * 1/1.18
+reflectance_files = sorted(Path(f'/home/kyle/iuvs/reflectance/orbit0{block}').glob(f'reflectance{orbit}*nonlinear-solstice.npy'))
+reflectance = np.load(reflectance_files[file]) / ff #* 1/1.18
 
 # Load in the corrected wavelengths
 wavelengths_files = sorted(Path(f'/home/kyle/iuvs/wavelengths/orbit0{block}/mvn_iuv_wlnonlin_apoapse-orbit0{orbit}-muv').glob(f'*orbit0{orbit}-muv*.sav'))
@@ -123,7 +123,7 @@ ice_particle_sizes = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_ice/particl
 ##############
 # Surface arrays
 ##############
-n_streams = 16
+n_streams = 8
 n_polar = 1    # defined by IUVS' viewing geometry
 n_azimuth = 1    # defined by IUVS' viewing geometry
 
@@ -231,7 +231,7 @@ def retrieval(integration: int, spatial_bin: int):
     ##############
     # Rayleigh scattering
     ##############
-    rayleigh_scattering_optical_depth = pyrt.rayleigh_co2_optical_depth(colden, pixel_wavs)
+    rayleigh_scattering_optical_depth = pyrt.rayleigh_co2_optical_depth(colden, pixel_wavs)# * 1 / np.cos(np.radians(solar_zenith_angle[integration, spatial_bin]))
     rayleigh_ssa = np.ones(rayleigh_scattering_optical_depth.shape)
     rayleigh_pmom = pyrt.rayleigh_legendre(rayleigh_scattering_optical_depth.shape[0], pixel_wavs.shape[0])
 
@@ -296,7 +296,7 @@ def retrieval(integration: int, spatial_bin: int):
             rhou[counter] = _rhou
 
     wavelength_indices = [1, 2, 3, -4, -3, -2]
-    #wavelength_indices = [-5, -4, -3, -2]
+    #wavelength_indices = [-4, -3, -2]
 
     def simulate_tau(guess: np.ndarray) -> np.ndarray:
         #print(f'guess = {guess}')
@@ -392,9 +392,6 @@ def retrieval(integration: int, spatial_bin: int):
                               mean_intensity, intensity, albedo_medium,
                               transmissivity_medium, maxcmu=n_streams, maxulv=n_user_levels, maxmom=128)
             simulated_toa_reflectance[counter] = uu[0, 0, 0]
-        #print([210, 215, 220, 290, 295, 300])
-        #print(reflectance[integration, spatial_bin, wavelength_indices])
-        #print(simulated_toa_reflectance)
         '''fig, ax = plt.subplots()
         ax.scatter(pixel_wavs, reflectance[integration, spatial_bin, :], label='data')
         ax.scatter(pixel_wavs[wavelength_indices], simulated_toa_reflectance, label='simulation')
@@ -410,12 +407,15 @@ def retrieval(integration: int, spatial_bin: int):
               f'{guess}')
         return np.sum((simulated_toa_reflectance - reflectance[integration, spatial_bin, wavelength_indices])**2)
 
-    fitted_optical_depth = minimize(find_best_fit, np.array([0.7, 0.2]), method='Powell', bounds=((0, 2), (0, 1))).x
+    fitted_optical_depth = minimize(find_best_fit, np.array([0.7, 0.2]), method='Powell', tol=1e-2, bounds=((0, 2), (0, 1))).x
     solution = np.array(fitted_optical_depth)
     sim = simulate_tau(solution)
     chi_squared = np.sum((reflectance[integration, spatial_bin, wavelength_indices] - sim)**2 / sim)
     print(f'chisq = {chi_squared}')
     print(f'answer={fitted_optical_depth}')
+    t1 = time.time()
+    print(t1 - t0)
+    raise SystemExit(9)
     return integration, spatial_bin, solution, chi_squared
 
 
@@ -449,15 +449,20 @@ pool = mp.Pool(n_cpus - 1)   # save one/two just to be safe. Some say it's faste
 
 # NOTE: if there are any issues in the argument of apply_async (here,
 # retrieve_ssa), it'll break out of that and move on to the next iteration.
-for integ in range(reflectance.shape[0]):
-    for posit in range(reflectance.shape[1]):
-        pool.apply_async(retrieval, args=(integ, posit), callback=make_answer)
-        #retrieval(integ, posit)
+#for integ in range(reflectance.shape[0]):
+#for integ in [0]:
+#    for posit in range(reflectance.shape[1]):
+#        pool.apply_async(retrieval, args=(integ, posit), callback=make_answer)
+
+for integ in [-100]:
+    for posit in [0]:
+        retrieval(integ, posit)
+
 # https://www.machinelearningplus.com/python/parallel-processing-python/
 pool.close()
 pool.join()  # I guess this postpones further code execution until the queue is finished
-np.save(f'/home/kyle/iuvs/retrievals/orbit0{block}/orbit{orbit}-{file}-dust.npy', retrieved_dust)
-np.save(f'/home/kyle/iuvs/retrievals/orbit0{block}/orbit{orbit}-{file}-ice.npy', retrieved_ice)
-np.save(f'/home/kyle/iuvs/retrievals/orbit0{block}/orbit{orbit}-{file}-chi_squared.npy', retrieved_chi_squared)
+#np.save(f'/home/kyle/iuvs/retrievals/orbit0{block}/data/orbit{orbit}-{file}-dust-test.npy', retrieved_dust)
+#np.save(f'/home/kyle/iuvs/retrievals/orbit0{block}/data/orbit{orbit}-{file}-ice-test.npy', retrieved_ice)
+#np.save(f'/home/kyle/iuvs/retrievals/orbit0{block}/data/orbit{orbit}-{file}-chi_squared-test.npy', retrieved_chi_squared)
 t1 = time.time()
 print(t1-t0)
