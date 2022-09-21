@@ -8,7 +8,6 @@ from tempfile import mkdtemp
 from astropy.io import fits
 from netCDF4 import Dataset
 import numpy as np
-import psycopg
 from scipy.constants import Boltzmann
 from scipy.integrate import quadrature as quad
 from scipy.optimize import minimize
@@ -30,26 +29,30 @@ lamber = True
 
 # Load in all the info from the given file
 orbit: int = 3467
+orbit_code = f'orbit' + f'{orbit}'.zfill(5)
 file: int = 9
 block = math.floor(orbit / 100) * 100
+orbit_block = 'orbit' + f'{block}'.zfill(5)
 
 # Connect to the DB to get the time of year of the orbit
-with psycopg.connect(host='localhost', dbname='iuvs', user='kyle', password='iuvs') as connection:
+'''with psycopg.connect(host='localhost', dbname='iuvs', user='kyle', password='iuvs') as connection:
     with connection.cursor() as cursor:
         cursor.execute(f"select sol from apoapse where orbit = {orbit}")
-        sol = cursor.fetchall()[0][0]
+        sol = cursor.fetchall()[0][0]'''
+
+sol = 377.2704868281845    # For 3467
 
 # Get the l1b file
-l1b_files = sorted(Path(f'/media/kyle/McDataFace/iuvsdata/production/orbit0{block}').glob(f'*apoapse*{orbit}*muv*.gz'))
+l1b_files = sorted(Path(f'/media/kyle/McDataFace/iuvsdata/production/{orbit_block}').glob(f'*apoapse*{orbit}*muv*.gz'))
 hdul = fits.open(l1b_files[file])
 
 # Load in the reflectance
 ff = np.load('/home/kyle/repos/PyUVS/pyuvs/anc/flatfields/mid-hi-res-flatfield-update.npy')
-reflectance_files = sorted(Path(f'/home/kyle/iuvs/reflectance/orbit0{block}').glob(f'reflectance{orbit}*nonlinear-solstice.npy'))
-reflectance = np.load(reflectance_files[file]) / ff #* 1/1.18
+reflectance_files = sorted(Path(f'/home/kyle/iuvs/reflectance/{orbit_block}').glob(f'reflectance-{orbit_code}*.npy'))
+reflectance = np.load(reflectance_files[file]) / ff
 
 # Load in the corrected wavelengths
-wavelengths_files = sorted(Path(f'/home/kyle/iuvs/wavelengths/orbit0{block}/mvn_iuv_wlnonlin_apoapse-orbit0{orbit}-muv').glob(f'*orbit0{orbit}-muv*.sav'))
+wavelengths_files = sorted(Path(f'/home/kyle/iuvs/wavelengths/{orbit_block}/mvn_iuv_wlnonlin_apoapse-{orbit_code}-muv').glob(f'*{orbit_code}-muv*.sav'))
 wavelengths = readsav(wavelengths_files[file])['wavelength_muv'] / 1000  # convert to microns
 
 # Get the data from the l1b file
@@ -74,9 +77,9 @@ mu = np.cos(np.radians(emission_angle))
 # Ames GCM
 ##############
 # Read in the Ames GCM
-grid = Dataset('/home/kyle/ames/sim1/10000.fixed.nc')
-gcm = Dataset('/home/kyle/ames/sim1/c48_big.atmos_diurn_plev-002.nc')
-yearly_gcm = Dataset('/home/kyle/ames/sim1/c48_big.atmos_average_plev-001.nc')
+grid = Dataset('/media/kyle/McDataFace/ames/sim1/10000.fixed.nc')
+gcm = Dataset('/media/kyle/McDataFace/ames/sim1/c48_big.atmos_diurn_plev-002.nc')
+yearly_gcm = Dataset('/media/kyle/McDataFace/ames/sim1/c48_big.atmos_average_plev-001.nc')
 #print(gcm.variables)
 
 gcm_lat = grid.variables['lat'][:]
@@ -402,9 +405,9 @@ def retrieval(integration: int, spatial_bin: int):
 
     def find_best_fit(guess: np.ndarray):
         simulated_toa_reflectance = simulate_tau(guess)
-        print(f'{reflectance[integration, spatial_bin, wavelength_indices]} \n'
+        '''print(f'{reflectance[integration, spatial_bin, wavelength_indices]} \n'
               f'{simulated_toa_reflectance} \n'
-              f'{guess}')
+              f'{guess}')'''
         return np.sum((simulated_toa_reflectance - reflectance[integration, spatial_bin, wavelength_indices])**2)
 
     fitted_optical_depth = minimize(find_best_fit, np.array([0.7, 0.2]), method='Powell', tol=1e-2, bounds=((0, 2), (0, 1))).x
@@ -413,9 +416,9 @@ def retrieval(integration: int, spatial_bin: int):
     chi_squared = np.sum((reflectance[integration, spatial_bin, wavelength_indices] - sim)**2 / sim)
     print(f'chisq = {chi_squared}')
     print(f'answer={fitted_optical_depth}')
-    t1 = time.time()
+    '''t1 = time.time()
     print(t1 - t0)
-    raise SystemExit(9)
+    raise SystemExit(9)'''
     return integration, spatial_bin, solution, chi_squared
 
 
@@ -444,25 +447,25 @@ def make_answer(inp):
 
 
 t0 = time.time()
-n_cpus = mp.cpu_count()    # = 8 for my desktop, 12 for my laptop
+n_cpus = mp.cpu_count()    # = 8 for my old desktop, 12 for my laptop, 20 for my new desktop
 pool = mp.Pool(n_cpus - 1)   # save one/two just to be safe. Some say it's faster
 
 # NOTE: if there are any issues in the argument of apply_async (here,
 # retrieve_ssa), it'll break out of that and move on to the next iteration.
 #for integ in range(reflectance.shape[0]):
-#for integ in [0]:
-#    for posit in range(reflectance.shape[1]):
-#        pool.apply_async(retrieval, args=(integ, posit), callback=make_answer)
+for integ in [0, 1, 2, 3]:
+    for posit in range(reflectance.shape[1]):
+        pool.apply_async(retrieval, args=(integ, posit), callback=make_answer)
 
-for integ in [-100]:
+'''for integ in [-100]:
     for posit in [0]:
-        retrieval(integ, posit)
+        retrieval(integ, posit)'''
 
 # https://www.machinelearningplus.com/python/parallel-processing-python/
 pool.close()
 pool.join()  # I guess this postpones further code execution until the queue is finished
-#np.save(f'/home/kyle/iuvs/retrievals/orbit0{block}/data/orbit{orbit}-{file}-dust-test.npy', retrieved_dust)
-#np.save(f'/home/kyle/iuvs/retrievals/orbit0{block}/data/orbit{orbit}-{file}-ice-test.npy', retrieved_ice)
-#np.save(f'/home/kyle/iuvs/retrievals/orbit0{block}/data/orbit{orbit}-{file}-chi_squared-test.npy', retrieved_chi_squared)
+np.save(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/orbit{orbit}-{file}-dust-test.npy', retrieved_dust)
+np.save(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/orbit{orbit}-{file}-ice-test.npy', retrieved_ice)
+np.save(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/orbit{orbit}-{file}-chi_squared-test.npy', retrieved_chi_squared)
 t1 = time.time()
 print(t1-t0)
