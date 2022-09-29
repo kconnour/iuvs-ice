@@ -13,21 +13,21 @@ orbit_code = f'orbit' + f'{orbit}'.zfill(5)
 block = math.floor(orbit / 100) * 100
 orbit_block = 'orbit' + f'{block}'.zfill(5)
 
-dust_files = sorted(Path(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/').glob(f'{orbit_code}-*-dust-radiance-nm.npy'))
-ice_files = sorted(Path(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/').glob(f'{orbit_code}-*-ice-radiance-nm.npy'))
-chi_squared_files = sorted(Path(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/').glob(f'{orbit_code}-*-chi_squared-radiance-nm.npy'))
+dust_files = sorted(Path(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/').glob(f'{orbit_code}-*-dust.npy'))
+ice_files = sorted(Path(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/').glob(f'{orbit_code}-*-ice.npy'))
+error_files = sorted(Path(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/').glob(f'{orbit_code}-*-error.npy'))
 dust = np.vstack([np.load(f) for f in dust_files])
 ice = np.vstack([np.load(f) for f in ice_files])
-chi_squared = np.vstack([np.load(f) for f in chi_squared_files])
+error = np.vstack([np.load(f) for f in error_files])
 
-'''fig, ax = plt.subplots(1, 3)
+fig, ax = plt.subplots(1, 3)
 
 ax[0].imshow(dust, vmin=0, vmax=2)
 ax[1].imshow(ice, vmin=0, vmax=1)
-ax[2].imshow(chi_squared)
+ax[2].imshow(error)
 
-plt.savefig(f'/home/kyle/iuvs/retrievals/{orbit_block}/images/{orbit_code}-radiance.png', dpi=200)
-raise SystemExit(9)'''
+plt.savefig(f'/home/kyle/iuvs/retrievals/{orbit_block}/images/{orbit_code}-radiance-new.png', dpi=200)
+raise SystemExit(9)
 
 
 files = sorted(Path(f'/media/kyle/McDataFace/iuvsdata/production/{orbit_block}').glob(f'*apoapse*{orbit_code}*muv*.gz'))
@@ -81,7 +81,7 @@ for swath in np.unique(swath_number):
     x, y = make_swath_grid(fov[swath_inds], swath, 133, n_integrations)
     dax = ax[0].pcolormesh(x, y, dust[swath_inds], linewidth=0, edgecolors='none', rasterized=True)
     iax = ax[1].pcolormesh(x, y, ice[swath_inds], linewidth=0, edgecolors='none', rasterized=True)
-    ax[2].pcolormesh(x, y, chi_squared[swath_inds], linewidth=0, edgecolors='none', rasterized=True)
+    ax[2].pcolormesh(x, y, error[swath_inds], linewidth=0, edgecolors='none', rasterized=True)
 
 divider = make_axes_locatable(ax[0])
 cax = divider.append_axes('right', size='5%', pad=0.05)
@@ -105,10 +105,11 @@ ax[1].set_xticks([])
 ax[1].set_yticks([])
 ax[1].set_facecolor('k')
 
+ax[2].set_title('Error')
 ax[2].set_xlim(0, angular_slit_width * (swath_number[-1] + 1))
 ax[2].set_ylim(minimum_mirror_angle * 2, maximum_mirror_angle * 2)
 ax[2].set_xticks([])
 ax[2].set_yticks([])
 ax[2].set_facecolor('k')
 
-plt.savefig(f'/home/kyle/iuvs/retrievals/{orbit_block}/images/{orbit_code}-radiance.png', dpi=200)
+plt.savefig(f'/home/kyle/iuvs/retrievals/{orbit_block}/images/{orbit_code}-radiance-nm.png', dpi=200)

@@ -52,7 +52,7 @@ if __name__ == '__main__':
     spice_path = Path('/media/kyle/McDataFace/spice')
     s = Spice(spice_path)
     s.load_spice()
-    orbits, all_et = s.find_all_maven_apsis_et('apoapse', endtime=datetime(2022, 5, 29))
+    orbits, all_et = s.find_all_maven_apsis_et('apoapse', endtime=datetime(2017, 5, 29))
 
     print('found apsis info')
     et = all_et[orbits == orbit][0]
@@ -212,7 +212,7 @@ if __name__ == '__main__':
                     solar_zenith_angle[integration, spatial_bin] >= 72 or \
                     emission_angle[integration, spatial_bin] >= 72:
                 answer = np.zeros((2,)) * np.nan
-                return integration, spatial_bin, answer, np.nan
+                return integration, spatial_bin, answer, np.nan, np.zeros(6,) * np.nan
 
             pixel_wavs = wavelengths[spatial_bin, :]
 
@@ -229,13 +229,25 @@ if __name__ == '__main__':
 
             # Get 1D profiles of temperature and pressure for this pixel (well, pressures are just fixed by the model to be the same everywhere)
             pixel_temperature = gcm_temperature[season_idx, lt_idx, :, lat_idx, lon_idx]
+            '''pixel_temperature = np.array([interpn((gcm_season, gcm_local_time, gcm_pressure_levels, gcm_lat, gcm_lon), gcm_temperature,
+                                                      (10000 + sol,
+                                            (local_time[integration, spatial_bin] - (longitude[integration, spatial_bin, 4] / 360 * 24)) % 24,
+                                            f, pixel_lat, pixel_lon), bounds_error=False) for f in gcm_pressure_levels])'''
 
             # Get where the "bad" values are
             first_bad = np.argmin(~pixel_temperature.mask)
 
             # Insert the surface values into the temperature and pressure arrays so they're shape (41,) instead of (40,)
-            sfc_pressure = gcm_surface_pressure[season_idx, lt_idx, lat_idx, lon_idx]
-            sfc_temperature = gcm_surface_temperature[season_idx, lt_idx, lat_idx, lon_idx]
+            sfc_pressure = gcm_surface_pressure[season_idx, lt_idx, lat_idx, lon_idx]    # This is NN
+            sfc_temperature = gcm_surface_temperature[season_idx, lt_idx, lat_idx, lon_idx]    # This is NN
+            '''sfc_pressure = interpn((gcm_season, gcm_local_time, gcm_lat, gcm_lon), gcm_surface_pressure,
+                                    (10000 + sol,
+                                    (local_time[integration, spatial_bin] - (longitude[integration, spatial_bin, 4] / 360 * 24)) % 24,
+                                    pixel_lat, pixel_lon), bounds_error=False)[0]
+            sfc_temperature = interpn((gcm_season, gcm_local_time, gcm_lat, gcm_lon), gcm_surface_temperature,
+                                      (10000 + sol,
+                                      (local_time[integration, spatial_bin] - (longitude[integration, spatial_bin, 4] / 360 * 24)) % 24,
+                                      pixel_lat, pixel_lon), bounds_error=False)[0]'''
             pixel_pressure = np.insert(gcm_pressure_levels, first_bad, sfc_pressure)
             pixel_temperature = np.insert(pixel_temperature, first_bad, sfc_temperature)
 
@@ -264,9 +276,15 @@ if __name__ == '__main__':
             # Aerosol vertical profiles
             ##############
             # Get the GCM profiles and normalize them
+            # I need to account for differences between the GCMs!!!
+            # Since pressure is the vertical coordinate, they arrays may not have the same lengths!!!!!
+            # So, set the bad values to the last good value
             dust_vprof = gcm_dust_vprof[yearly_idx, :first_bad, lat_idx, lon_idx]
+            dust_vprof[dust_vprof.mask] = dust_vprof[np.argmin(~dust_vprof.mask)-1]
             dust_vprof = dust_vprof / np.sum(dust_vprof)
+
             ice_vprof = gcm_ice_vprof[yearly_idx, :first_bad, lat_idx, lon_idx]
+            ice_vprof[ice_vprof.mask] = ice_vprof[np.argmin(~ice_vprof.mask) - 1]
             ice_vprof = ice_vprof / np.sum(ice_vprof)
 
             ##############
@@ -427,8 +445,8 @@ if __name__ == '__main__':
                 return np.sum((simulated_toa_reflectance - reflectance[integration, spatial_bin, wavelength_indices])**2)
 
             fitted_optical_depth = minimize(find_best_fit, np.array([0.7, 0.2]), method='Nelder-Mead', tol=1e-2, bounds=((0, 2), (0, 1))).x
-            solution = np.array(fitted_optical_depth)
-            sim = simulate_tau(solution)
+            best_fit_od = np.array(fitted_optical_depth)
+            sim = simulate_tau(best_fit_od)
             #error = np.sum((reflectance[integration, spatial_bin, wavelength_indices] - sim)**2 / sim)
             total_error = np.abs(reflectance[integration, spatial_bin, wavelength_indices] - sim) / reflectance[integration, spatial_bin, wavelength_indices]
             error = np.sum(total_error) / len(total_error)  # This is the mean relative error
@@ -437,7 +455,7 @@ if __name__ == '__main__':
             '''t1 = time.time()
             print(t1 - t0)
             raise SystemExit(9)'''
-            return integration, spatial_bin, solution, error
+            return integration, spatial_bin, best_fit_od, error, sim
 
 
         # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -446,21 +464,26 @@ if __name__ == '__main__':
         memmap_filename_dust = os.path.join(mkdtemp(), 'myNewFileDust.dat')
         memmap_filename_ice = os.path.join(mkdtemp(), 'myNewFileIce.dat')
         memmap_filename_error = os.path.join(mkdtemp(), 'myNewFileError.dat')
+        memmap_filename_radiance = os.path.join(mkdtemp(), 'myNewFileRadiance.dat')
         retrieved_dust = np.memmap(memmap_filename_dust, dtype=float,
                                    shape=reflectance.shape[:-1], mode='w+')
         retrieved_ice = np.memmap(memmap_filename_ice, dtype=float,
                                    shape=reflectance.shape[:-1], mode='w+')
         retrieved_error = np.memmap(memmap_filename_error, dtype=float,
                                    shape=reflectance.shape[:-1], mode='w+')
+        retrieved_radiance = np.memmap(memmap_filename_radiance, dtype=float,
+                                   shape=reflectance.shape[:-1] + (6,), mode='w+')   # This 6 is for 6 wavelengths
 
         def make_answer(inp):
             integration = inp[0]
             position = inp[1]
             answer = inp[2]
             err = inp[3]
+            simulated_radiance = inp[4]
             retrieved_dust[integration, position] = answer[0]
             retrieved_ice[integration, position] = answer[1]
             retrieved_error[integration, position] = err
+            retrieved_radiance[integration, position] = simulated_radiance
 
         n_cpus = mp.cpu_count()    # = 8 for my old desktop, 12 for my laptop, 20 for my new desktop
         pool = mp.Pool(n_cpus - 1)   # save one/two just to be safe. Some say it's faster
@@ -472,17 +495,18 @@ if __name__ == '__main__':
                 #print(f'starting integ {integ} and posti {posit}')
                 #retrieval(integ, posit)
 
-        '''for integ in [-100]:
-            for posit in [0]:
+        '''for integ in [195]:
+            for posit in [108]:
                 retrieval(integ, posit)'''
 
         # https://www.machinelearningplus.com/python/parallel-processing-python/
         pool.close()
         pool.join()  # I guess this postpones further code execution until the queue is finished
         fileno = f'{file}'.zfill(2)
-        np.save(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/{orbit_code}-{fileno}-dust-radiance.npy', retrieved_dust)
-        np.save(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/{orbit_code}-{fileno}-ice-radiance.npy', retrieved_ice)
-        np.save(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/{orbit_code}-{fileno}-error-radiance.npy', retrieved_error)
+        np.save(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/{orbit_code}-{fileno}-dust.npy', retrieved_dust)
+        np.save(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/{orbit_code}-{fileno}-ice.npy', retrieved_ice)
+        np.save(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/{orbit_code}-{fileno}-error.npy', retrieved_error)
+        np.save(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/{orbit_code}-{fileno}-simulated_radiance.npy', retrieved_radiance)
 
     for file in range(len(l1b_files)):
         print(f'starting file {file}')
