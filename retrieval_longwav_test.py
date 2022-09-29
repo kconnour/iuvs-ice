@@ -30,7 +30,7 @@ from pyuvs.spice import *
 if __name__ == '__main__':
     t0 = time.time()
     # Load in all the info from the given file
-    orbit: int = 3453
+    orbit: int = 3751
     orbit_code = f'orbit' + f'{orbit}'.zfill(5)
     block = math.floor(orbit / 100) * 100
     orbit_block = 'orbit' + f'{block}'.zfill(5)
