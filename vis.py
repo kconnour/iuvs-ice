@@ -17,11 +17,20 @@ icevmax = 1
 errorvmax = 0.1
 latmin = -45
 latmax = 45
-lonmin = 180
-lonmax = 270
+lonmin = 180#+45
+lonmax = 270#+45
 dustcmap = 'cividis'
 icecmap = 'viridis'
 errorcmap = 'magma'
+
+# Load in radprop
+dust_cext = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_dust/extinction_cross_section.npy')  # (24, 317)
+ice_cext = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_ice/extinction_cross_section.npy')  # (13, 1568)
+
+dust_wavelengths = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_dust/wavelengths.npy')
+dust_particle_sizes = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_dust/particle_sizes.npy')
+ice_wavelengths = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_ice/wavelengths.npy')
+ice_particle_sizes = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_ice/particle_sizes.npy')
 
 #######################
 ### Add in the IUVS data in QL form
@@ -37,6 +46,15 @@ error_files = sorted(Path(f'/home/kyle/iuvs/retrievals/{orbit_block}/data/').glo
 dust = np.vstack([np.load(f) for f in dust_files])
 ice = np.vstack([np.load(f) for f in ice_files])
 error = np.vstack([np.load(f) for f in error_files])
+
+'''fig, ax = plt.subplots(1, 3)
+
+ax[0].imshow(dust, vmin=0, vmax=2)
+ax[1].imshow(ice, vmin=0, vmax=1)
+ax[2].imshow(error, vmin=0, vmax=0.1)
+
+plt.savefig(f'/home/kyle/iuvs/retrievals/{orbit_block}/images/{orbit_code}.png', dpi=200)
+raise SystemExit(9)'''
 
 
 files = sorted(Path(f'/media/kyle/McDataFace/iuvsdata/production/{orbit_block}').glob(f'*apoapse*{orbit_code}*muv*.gz'))
@@ -87,7 +105,13 @@ for swath in np.unique(swath_number):
     swath_inds = swath_number == swath
     n_integrations = np.sum(swath_inds)
     x, y = make_swath_grid(fov[swath_inds], swath, 133, n_integrations)
-    dax = ax[0, 0].pcolormesh(x, y, dust[swath_inds], linewidth=0, edgecolors='none', rasterized=True, vmin=0, vmax=dustvmax, cmap='cividis')
+    # APP flip
+    #dax = ax[0, 0].pcolormesh(x, y, np.fliplr(dust[swath_inds]), linewidth=0, edgecolors='none', rasterized=True, vmin=0, vmax=dustvmax, cmap='cividis')
+    #iax = ax[1, 0].pcolormesh(x, y, np.fliplr(ice[swath_inds]), linewidth=0, edgecolors='none', rasterized=True, vmin=0, vmax=icevmax, cmap='viridis')
+    #eax = ax[2, 0].pcolormesh(x, y, np.fliplr(error[swath_inds]), linewidth=0, edgecolors='none', rasterized=True, vmin=0, vmax=errorvmax, cmap='magma')
+
+    # No APP flip
+    dax = ax[0, 0].pcolormesh(x, y, dust[swath_inds], linewidth=0, edgecolors='none', rasterized=True,vmin=0, vmax=dustvmax, cmap='cividis')
     iax = ax[1, 0].pcolormesh(x, y, ice[swath_inds], linewidth=0, edgecolors='none', rasterized=True, vmin=0, vmax=icevmax, cmap='viridis')
     eax = ax[2, 0].pcolormesh(x, y, error[swath_inds], linewidth=0, edgecolors='none', rasterized=True, vmin=0, vmax=errorvmax, cmap='magma')
 
@@ -226,16 +250,50 @@ ax[1, 2].set_ylim(latmin, latmax)
 ax[1, 2].set_facecolor('gray')
 
 #######################
-### Add in the dust/ice climatology
+### Add in the Montabone assimilated dust
+#######################
+# UV / VIS
+foo = dust_cext[-8]
+dustvis = np.mean(foo[(0.4 <= dust_wavelengths) & (dust_wavelengths <= 0.8)])
+dustuv = np.mean(foo[(0.2 <= dust_wavelengths) & (dust_wavelengths <= 0.3)])
+dust_scaling = dustvis / dustuv
+
+assimilated_dust_dataset = Dataset('/home/kyle/iuvs/dustscenario_MY33_v2-1.nc')
+assimilated_dust = assimilated_dust_dataset['cdodtot'][:]
+#dust_lat = assimilated_dust_dataset['latitude'][:]
+#dust_lon = np.roll(assimilated_dust_dataset['longitude'][:], 60)
+#dust_lon = np.where(dust_lon < 0, dust_lon+360, dust_lon)
+assimilated_dust = np.roll(assimilated_dust, 60, axis=-1)
+
+# Get the lat/lon midpoints and tack on the ends
+#dust_lat = (dust_lat[:-1] + dust_lat[1:]) / 2
+#dust_lat = np.concatenate(([90], dust_lat, [-90]))
+dust_lat = np.linspace(90, -90, num=61)
+dust_lon = np.linspace(0, 360, num=121)
+
+assim_dust_ax = ax[0, 2].pcolormesh(dust_lon, dust_lat, assimilated_dust[int(sol), :, :] * 2.6 * dust_scaling, vmin=0, vmax=dustvmax, cmap=dustcmap)
+
+ax[0, 2].set_title('Assimilated Dust')
+ax[0, 2].set_xlim(lonmin, lonmax)
+ax[0, 2].set_ylim(latmin, latmax)
+ax[0, 2].set_facecolor('gray')
+
+#######################
+### Add in the GCM dust/ice climatology
 #######################
 yearly_gcm = Dataset('/media/kyle/McDataFace/ames/sim1/c48_big.atmos_average_plev-001.nc')
+
+foo = ice_cext[-5]
+icevis = np.mean(foo[(0.4 <= ice_wavelengths) & (ice_wavelengths <= 0.8)])
+iceuv = np.mean(foo[(0.2 <= ice_wavelengths) & (ice_wavelengths <= 0.3)])
+ice_scaling = icevis / iceuv
 
 gcm_dust = yearly_gcm['taudust_VIS'][:]
 gcm_ice = yearly_gcm['taucloud_VIS'][:]
 gcm_lat = np.broadcast_to(np.linspace(-90, 90, num=91), (181, 91))
 gcm_lon = np.broadcast_to(np.linspace(0, 360, num=181), (91, 181)).T
-gcm_dust_ax = ax[0, 3].pcolormesh(gcm_lon, gcm_lat, gcm_dust[int(sol/668*140), :, :].T, vmin=0, vmax=dustvmax, cmap=dustcmap)
-gcm_ice_ax = ax[1, 3].pcolormesh(gcm_lon, gcm_lat, gcm_ice[int(sol/668*140), :, :].T, vmin=0, vmax=icevmax, cmap=icecmap)
+gcm_dust_ax = ax[0, 3].pcolormesh(gcm_lon, gcm_lat, gcm_dust[int(sol/668*140), :, :].T * dust_scaling, vmin=0, vmax=dustvmax, cmap=dustcmap)
+gcm_ice_ax = ax[1, 3].pcolormesh(gcm_lon, gcm_lat, gcm_ice[int(sol/668*140), :, :].T * ice_scaling, vmin=0, vmax=icevmax, cmap=icecmap)
 
 divider = make_axes_locatable(ax[0, 3])
 cax = divider.append_axes('right', size='5%', pad=0.05)

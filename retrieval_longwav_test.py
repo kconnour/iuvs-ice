@@ -30,7 +30,7 @@ from pyuvs.spice import *
 if __name__ == '__main__':
     t0 = time.time()
     # Load in all the info from the given file
-    orbit: int = 3751
+    orbit: int = 3464
     orbit_code = f'orbit' + f'{orbit}'.zfill(5)
     block = math.floor(orbit / 100) * 100
     orbit_block = 'orbit' + f'{block}'.zfill(5)
@@ -43,7 +43,7 @@ if __name__ == '__main__':
     # Get the l1b file
     l1b_files = sorted(Path(f'/media/kyle/McDataFace/iuvsdata/production/{orbit_block}').glob(f'*apoapse*{orbit}*muv*.gz'))
     # Load in the reflectance
-    ff = np.load('/home/kyle/repos/PyUVS/pyuvs/anc/flatfields/mid-hi-res-flatfield-update.npy')
+    ff = np.load('/home/kyle/repos/PyUVS-old/pyuvs/anc/flatfields/mid-hi-res-flatfield-my34gds.npy')
     reflectance_files = sorted(Path(f'/home/kyle/iuvs/radiance/{orbit_block}').glob(f'radiance-{orbit_code}*.npy'))
     # Load in the corrected wavelengths
     wavelengths_files = sorted(Path(f'/home/kyle/iuvs/wavelengths/{orbit_block}').glob(f'*{orbit_code}*'))
@@ -444,7 +444,7 @@ if __name__ == '__main__':
                       f'{guess}')'''
                 return np.sum((simulated_toa_reflectance - reflectance[integration, spatial_bin, wavelength_indices])**2)
 
-            fitted_optical_depth = minimize(find_best_fit, np.array([0.7, 0.2]), method='Nelder-Mead', tol=1e-2, bounds=((0, 2), (0, 1))).x
+            fitted_optical_depth = minimize(find_best_fit, np.array([0.7, 0.2]), method='Nelder-Mead', tol=1e-2, bounds=((0, 2), (0, 1)), options={'adaptive': True}).x
             best_fit_od = np.array(fitted_optical_depth)
             sim = simulate_tau(best_fit_od)
             #error = np.sum((reflectance[integration, spatial_bin, wavelength_indices] - sim)**2 / sim)
