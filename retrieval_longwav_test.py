@@ -30,7 +30,7 @@ from pyuvs.spice import *
 if __name__ == '__main__':
     t0 = time.time()
     # Load in all the info from the given file
-    orbit: int = 3464
+    orbit: int = 3453
     orbit_code = f'orbit' + f'{orbit}'.zfill(5)
     block = math.floor(orbit / 100) * 100
     orbit_block = 'orbit' + f'{block}'.zfill(5)
@@ -97,6 +97,13 @@ if __name__ == '__main__':
     band6 = fits.open('/home/kyle/repos/iuvs-ice/map/band6_w.fits')['primary'].data
     band7 = fits.open('/home/kyle/repos/iuvs-ice/map/band7_w.fits')['primary'].data
     hapke_w = np.dstack((band6, band7))
+
+    ##############
+    # Surface albedo map
+    ##############
+    mola = np.load('/home/kyle/repos/iuvs-ice/map/mola-topography.npy')   # This is in meters, not km
+    mola_lat = np.linspace(90, -90, num=1440)
+    mola_lon = np.linspace(0, 360, num=2880)
 
     ##############
     # Aerosol radprop
@@ -229,40 +236,46 @@ if __name__ == '__main__':
 
             # Get 1D profiles of temperature and pressure for this pixel (well, pressures are just fixed by the model to be the same everywhere)
             pixel_temperature = gcm_temperature[season_idx, lt_idx, :, lat_idx, lon_idx]
-            '''pixel_temperature = np.array([interpn((gcm_season, gcm_local_time, gcm_pressure_levels, gcm_lat, gcm_lon), gcm_temperature,
-                                                      (10000 + sol,
-                                            (local_time[integration, spatial_bin] - (longitude[integration, spatial_bin, 4] / 360 * 24)) % 24,
-                                            f, pixel_lat, pixel_lon), bounds_error=False) for f in gcm_pressure_levels])'''
 
-            # Get where the "bad" values are
-            first_bad = np.argmin(~pixel_temperature.mask)
+            # Get where the surface index would be
+            surface_idx = np.argmin(~pixel_temperature.mask)
 
             # Insert the surface values into the temperature and pressure arrays so they're shape (41,) instead of (40,)
             sfc_pressure = gcm_surface_pressure[season_idx, lt_idx, lat_idx, lon_idx]    # This is NN
             sfc_temperature = gcm_surface_temperature[season_idx, lt_idx, lat_idx, lon_idx]    # This is NN
-            '''sfc_pressure = interpn((gcm_season, gcm_local_time, gcm_lat, gcm_lon), gcm_surface_pressure,
-                                    (10000 + sol,
-                                    (local_time[integration, spatial_bin] - (longitude[integration, spatial_bin, 4] / 360 * 24)) % 24,
-                                    pixel_lat, pixel_lon), bounds_error=False)[0]
-            sfc_temperature = interpn((gcm_season, gcm_local_time, gcm_lat, gcm_lon), gcm_surface_temperature,
-                                      (10000 + sol,
-                                      (local_time[integration, spatial_bin] - (longitude[integration, spatial_bin, 4] / 360 * 24)) % 24,
-                                      pixel_lat, pixel_lon), bounds_error=False)[0]'''
-            pixel_pressure = np.insert(gcm_pressure_levels, first_bad, sfc_pressure)
-            pixel_temperature = np.insert(pixel_temperature, first_bad, sfc_temperature)
+            pixel_pressure = np.insert(gcm_pressure_levels, surface_idx, sfc_pressure)
+            pixel_temperature = np.insert(pixel_temperature, surface_idx, sfc_temperature)
+
+            # Get the average altitude from the GCM
+            gcm_lat_min = (gcm_lat[lat_idx-1] + gcm_lat[lat_idx]) / 2
+            gcm_lat_max = (gcm_lat[lat_idx] + gcm_lat[lat_idx+1]) / 2
+            gcm_lon_max = (gcm_lon[lon_idx] + gcm_lon[lon_idx + 1]) / 2
+            gcm_lon_min = (gcm_lon[lon_idx-1] + gcm_lon[lon_idx]) / 2
+            gcm_mean_alt = np.mean(mola[np.bitwise_and(mola_lat >= gcm_lat_min, mola_lat <= gcm_lat_max),
+                                        np.bitwise_and(mola_lon >= gcm_lon_min, mola_lon <= gcm_lon_max)])
+
+            # Get the average altitude of an IUVS pixel (this is hackish, cause I just average the corners and center)
+            def get_altitude_of_point(lat_point, lon_point):
+                mola_lat_idx = np.argmin(np.abs(mola_lat - lat_point))
+                mola_lon_idx = np.argmin(np.abs(mola_lon - lon_point))
+                return mola[mola_lat_idx, mola_lon_idx]
+
+            # Get the scale factor to multiply the Rayleigh OD by
+            iuvs_mean_alt = np.mean([get_altitude_of_point(latitude[integration, spatial_bin, f], longitude[integration, spatial_bin, f]) for f in range(5)])
+            pressure_scale_factor = np.exp((gcm_mean_alt - iuvs_mean_alt) / 10000)
 
             # Make the altitudes assuming exponentially decreasing pressure and constant scale height
             z = -np.log(pixel_pressure / sfc_pressure) * 10
 
             # Finally, use these to compute the column density in each "good" layer
-            colden = column_density(linear_grid_profile, linear_grid_profile, z[:first_bad+1],
-                                    (z[:first_bad+1], pixel_pressure[:first_bad+1]),
-                                    (z[:first_bad+1], pixel_temperature[:first_bad+1]))
+            colden = column_density(linear_grid_profile, linear_grid_profile, z[:surface_idx+1],
+                                    (z[:surface_idx+1], pixel_pressure[:surface_idx+1]),
+                                    (z[:surface_idx+1], pixel_temperature[:surface_idx+1])) * pressure_scale_factor
 
             ##############
             # Rayleigh scattering
             ##############
-            rayleigh_scattering_optical_depth = pyrt.rayleigh_co2_optical_depth(colden, pixel_wavs) # / np.cos(np.radians(solar_zenith_angle[integration, spatial_bin]))
+            rayleigh_scattering_optical_depth = pyrt.rayleigh_co2_optical_depth(colden, pixel_wavs)
             rayleigh_ssa = np.ones(rayleigh_scattering_optical_depth.shape)
             rayleigh_pmom = pyrt.rayleigh_legendre(rayleigh_scattering_optical_depth.shape[0], pixel_wavs.shape[0])
 
@@ -279,11 +292,11 @@ if __name__ == '__main__':
             # I need to account for differences between the GCMs!!!
             # Since pressure is the vertical coordinate, they arrays may not have the same lengths!!!!!
             # So, set the bad values to the last good value
-            dust_vprof = gcm_dust_vprof[yearly_idx, :first_bad, lat_idx, lon_idx]
+            dust_vprof = gcm_dust_vprof[yearly_idx, :surface_idx, lat_idx, lon_idx]
             dust_vprof[dust_vprof.mask] = dust_vprof[np.argmin(~dust_vprof.mask)-1]
             dust_vprof = dust_vprof / np.sum(dust_vprof)
 
-            ice_vprof = gcm_ice_vprof[yearly_idx, :first_bad, lat_idx, lon_idx]
+            ice_vprof = gcm_ice_vprof[yearly_idx, :surface_idx, lat_idx, lon_idx]
             ice_vprof[ice_vprof.mask] = ice_vprof[np.argmin(~ice_vprof.mask) - 1]
             ice_vprof = ice_vprof / np.sum(ice_vprof)
 
@@ -355,7 +368,7 @@ if __name__ == '__main__':
                     dust_extinction = pyrt.extinction_ratio_grid(dust_cext, dust_particle_sizes, dust_wavelengths, pixel_wavs[wav_index])
                     dust_reff_grid = np.linspace(1.5, 1.5, num=100)
                     dust_z_reff = np.linspace(100, 0, num=100)
-                    dust_reff = np.interp(np.flip(z[:first_bad]), np.flip(dust_z_reff), np.flip(dust_reff_grid))   # The "bad" altitudes don't get assigned a particle size
+                    dust_reff = np.interp(np.flip(z[:surface_idx]), np.flip(dust_z_reff), np.flip(dust_reff_grid))   # The "bad" altitudes don't get assigned a particle size
 
                     dust_extinction_grid = pyrt.regrid(dust_extinction, dust_particle_sizes, dust_wavelengths, dust_reff, pixel_wavs)
 
@@ -371,7 +384,7 @@ if __name__ == '__main__':
                     ice_extinction = pyrt.extinction_ratio_grid(ice_cext, ice_particle_sizes, ice_wavelengths, pixel_wavs[wav_index])
                     ice_reff_grid = np.linspace(3, 3, num=100)
                     ice_z_reff = np.linspace(100, 0, num=100)
-                    ice_reff = np.interp(np.flip(z[:first_bad]), np.flip(ice_z_reff), np.flip(ice_reff_grid))   # The "bad" altitudes don't get assigned a particle size
+                    ice_reff = np.interp(np.flip(z[:surface_idx]), np.flip(ice_z_reff), np.flip(ice_reff_grid))   # The "bad" altitudes don't get assigned a particle size
 
                     ice_extinction_grid = pyrt.regrid(ice_extinction, ice_particle_sizes, ice_wavelengths, ice_reff, pixel_wavs)
 
@@ -466,13 +479,13 @@ if __name__ == '__main__':
         memmap_filename_error = os.path.join(mkdtemp(), 'myNewFileError.dat')
         memmap_filename_radiance = os.path.join(mkdtemp(), 'myNewFileRadiance.dat')
         retrieved_dust = np.memmap(memmap_filename_dust, dtype=float,
-                                   shape=reflectance.shape[:-1], mode='w+')
+                                   shape=reflectance.shape[:-1], mode='w+') * np.nan
         retrieved_ice = np.memmap(memmap_filename_ice, dtype=float,
-                                   shape=reflectance.shape[:-1], mode='w+')
+                                   shape=reflectance.shape[:-1], mode='w+') * np.nan
         retrieved_error = np.memmap(memmap_filename_error, dtype=float,
-                                   shape=reflectance.shape[:-1], mode='w+')
+                                   shape=reflectance.shape[:-1], mode='w+') * np.nan
         retrieved_radiance = np.memmap(memmap_filename_radiance, dtype=float,
-                                   shape=reflectance.shape[:-1] + (6,), mode='w+')   # This 6 is for 6 wavelengths
+                                   shape=reflectance.shape[:-1] + (6,), mode='w+') * np.nan  # This 6 is for 6 wavelengths
 
         def make_answer(inp):
             integration = inp[0]
@@ -489,14 +502,15 @@ if __name__ == '__main__':
         pool = mp.Pool(n_cpus - 1)   # save one/two just to be safe. Some say it's faster
         # NOTE: if there are any issues in the argument of apply_async (here,
         # retrieve_ssa), it'll break out of that and move on to the next iteration.
+
         for integ in range(reflectance.shape[0]):
             for posit in range(reflectance.shape[1]):
                 pool.apply_async(func=retrieval, args=(integ, posit), callback=make_answer)
                 #print(f'starting integ {integ} and posti {posit}')
                 #retrieval(integ, posit)
 
-        '''for integ in [195]:
-            for posit in [108]:
+        '''for integ in [254-228]:
+            for posit in [55]:
                 retrieval(integ, posit)'''
 
         # https://www.machinelearningplus.com/python/parallel-processing-python/
