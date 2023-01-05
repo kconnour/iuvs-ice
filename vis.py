@@ -11,9 +11,9 @@ from netCDF4 import Dataset
 import mer
 
 # Plot parameters
-fig, ax = plt.subplots(3, 4, figsize=(12, 9))
+fig, ax = plt.subplots(3, 5, figsize=(15, 9))
 dustvmax = 2
-icevmax = 1
+icevmax = 0.6
 errorvmax = 0.1
 latmin = -45
 latmax = 45
@@ -35,7 +35,7 @@ ice_particle_sizes = np.load('/home/kyle/repos/iuvs-ice/radprop/mars_ice/particl
 #######################
 ### Add in the IUVS data in QL form
 #######################
-orbit = 3453
+orbit = 3400
 orbit_code = f'orbit' + f'{orbit}'.zfill(5)
 block = math.floor(orbit / 100) * 100
 orbit_block = 'orbit' + f'{block}'.zfill(5)
@@ -129,7 +129,7 @@ ax[1, 0].set_xticks([])
 ax[1, 0].set_yticks([])
 ax[1, 0].set_facecolor('gray')
 
-ax[2, 0].set_title('Error')
+ax[2, 0].set_title('Residual')
 ax[2, 0].set_xlim(0, angular_slit_width * (swath_number[-1] + 1))
 ax[2, 0].set_ylim(minimum_mirror_angle * 2, maximum_mirror_angle * 2)
 ax[2, 0].set_xticks([])
@@ -213,7 +213,7 @@ ax[1, 1].set_xlim(lonmin, lonmax)
 ax[1, 1].set_ylim(latmin, latmax)
 ax[1, 1].set_facecolor('gray')
 
-ax[2, 1].set_title('IUVS Error')
+ax[2, 1].set_title('IUVS Residual')
 ax[2, 1].set_xlim(lonmin, lonmax)
 ax[2, 1].set_ylim(latmin, latmax)
 ax[2, 1].set_facecolor('gray')
@@ -279,7 +279,7 @@ ax[0, 2].set_ylim(latmin, latmax)
 ax[0, 2].set_facecolor('gray')
 
 #######################
-### Add in the GCM dust/ice climatology
+### Add in the Ames GCM dust/ice climatology
 #######################
 yearly_gcm = Dataset('/media/kyle/McDataFace/ames/sim1/c48_big.atmos_average_plev-001.nc')
 
@@ -295,13 +295,13 @@ gcm_lon = np.broadcast_to(np.linspace(0, 360, num=181), (91, 181)).T
 gcm_dust_ax = ax[0, 3].pcolormesh(gcm_lon, gcm_lat, gcm_dust[int(sol/668*140), :, :].T * dust_scaling, vmin=0, vmax=dustvmax, cmap=dustcmap)
 gcm_ice_ax = ax[1, 3].pcolormesh(gcm_lon, gcm_lat, gcm_ice[int(sol/668*140), :, :].T * ice_scaling, vmin=0, vmax=icevmax, cmap=icecmap)
 
-divider = make_axes_locatable(ax[0, 3])
+'''divider = make_axes_locatable(ax[0, 3])
 cax = divider.append_axes('right', size='5%', pad=0.05)
 fig.colorbar(gcm_dust_ax, cax=cax, orientation='vertical')
 
 divider = make_axes_locatable(ax[1, 3])
 cax = divider.append_axes('right', size='5%', pad=0.05)
-fig.colorbar(gcm_ice_ax, cax=cax, orientation='vertical')
+fig.colorbar(gcm_ice_ax, cax=cax, orientation='vertical')'''
 
 ax[0, 3].set_title('Ames GCM Dust')
 ax[0, 3].set_xlim(lonmin, lonmax)
@@ -311,14 +311,44 @@ ax[1, 3].set_title('Ames GCM Ice')
 ax[1, 3].set_xlim(lonmin, lonmax)
 ax[1, 3].set_ylim(latmin, latmax)
 
-# Remove unused plot ticks
-ax[0, 2].set_xticks([])
-ax[0, 2].set_yticks([])
+#######################
+### Add in the PCM dust/ice climatology
+#######################
+yearly_gcm = Dataset('/media/kyle/McDataFace/pcm/run_MY33/diagfi7.nc')
 
+pcm_sol_idx = np.argmin(np.abs(sol - 372 - yearly_gcm['Time'][:]))
+
+gcm_ice = np.roll(yearly_gcm['h2o_ice'][:], 32, axis=-1)
+gcm_lat = np.broadcast_to(np.linspace(90, -90, num=50), (66, 50))
+gcm_lon = np.broadcast_to(np.linspace(0, 360, num=66), (50, 66)).T
+#gcm_dust_ax = ax[0, 4].pcolormesh(gcm_lon, gcm_lat, gcm_dust[int(sol/668*140), :, :].T * dust_scaling, vmin=0, vmax=dustvmax, cmap=dustcmap)
+ax[1, 4].pcolormesh(gcm_lon, gcm_lat, np.sum(gcm_ice[pcm_sol_idx, :, :, :], axis=0).T, vmin=0, vmax=0.001, cmap=icecmap)
+
+divider = make_axes_locatable(ax[0, 4])
+cax = divider.append_axes('right', size='5%', pad=0.05)
+fig.colorbar(gcm_dust_ax, cax=cax, orientation='vertical')
+
+divider = make_axes_locatable(ax[1, 4])
+cax = divider.append_axes('right', size='5%', pad=0.05)
+fig.colorbar(gcm_ice_ax, cax=cax, orientation='vertical')
+
+ax[0, 4].set_title('PCM Dust')
+ax[0, 4].set_xlim(lonmin, lonmax)
+ax[0, 4].set_ylim(latmin, latmax)
+
+ax[1, 4].set_title('PCM Ice column')
+ax[1, 4].set_xlim(lonmin, lonmax)
+ax[1, 4].set_ylim(latmin, latmax)
+
+# Remove unused plot ticks
 ax[2, 2].set_xticks([])
 ax[2, 2].set_yticks([])
 
 ax[2, 3].set_xticks([])
 ax[2, 3].set_yticks([])
 
+ax[2, 4].set_xticks([])
+ax[2, 4].set_yticks([])
+
+fig.tight_layout()
 plt.savefig(f'/home/kyle/iuvs/retrievals/{orbit_block}/images/{orbit_code}.png', dpi=200)

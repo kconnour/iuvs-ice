@@ -12,7 +12,7 @@ from netCDF4 import Dataset
 import numpy as np
 from scipy.constants import Boltzmann
 from scipy.integrate import quadrature as quad
-from scipy.optimize import minimize
+from scipy.optimize import minimize, differential_evolution
 from scipy.io import readsav
 from scipy.interpolate import interpn
 
@@ -30,7 +30,7 @@ from pyuvs.spice import *
 if __name__ == '__main__':
     t0 = time.time()
     # Load in all the info from the given file
-    orbit: int = 3453
+    orbit: int = 3753
     orbit_code = f'orbit' + f'{orbit}'.zfill(5)
     block = math.floor(orbit / 100) * 100
     orbit_block = 'orbit' + f'{block}'.zfill(5)
@@ -463,10 +463,21 @@ if __name__ == '__main__':
             #error = np.sum((reflectance[integration, spatial_bin, wavelength_indices] - sim)**2 / sim)
             total_error = np.abs(reflectance[integration, spatial_bin, wavelength_indices] - sim) / reflectance[integration, spatial_bin, wavelength_indices]
             error = np.sum(total_error) / len(total_error)  # This is the mean relative error
-            print(f'error = {error}')
+            if error > 0.1:
+                fitted_optical_depth = minimize(find_best_fit, np.array([0.5, 0.1]), method='Nelder-Mead', tol=1e-2, bounds=((0, 2), (0, 1)), options={'adaptive': True}).x
+                best_fit_od = np.array(fitted_optical_depth)
+                sim = simulate_tau(best_fit_od)
+                # error = np.sum((reflectance[integration, spatial_bin, wavelength_indices] - sim)**2 / sim)
+                total_error = np.abs(reflectance[integration, spatial_bin, wavelength_indices] - sim) / reflectance[integration, spatial_bin, wavelength_indices]
+                error = np.sum(total_error) / len(total_error)  # This is the mean relative error
+
+            '''print(f'data = {reflectance[integration, spatial_bin, wavelength_indices]}')
+            print(f'sim = {sim}')
             print(f'answer={fitted_optical_depth}')
-            '''t1 = time.time()
+            print(f'error = {error}')
+            t1 = time.time()
             print(t1 - t0)
+            print(pixel_lat, pixel_lon)
             raise SystemExit(9)'''
             return integration, spatial_bin, best_fit_od, error, sim
 
@@ -509,8 +520,9 @@ if __name__ == '__main__':
                 #print(f'starting integ {integ} and posti {posit}')
                 #retrieval(integ, posit)
 
-        '''for integ in [254-228]:
-            for posit in [55]:
+        # This is OM in 3453-03
+        '''for integ in [25]:
+            for posit in [30]:
                 retrieval(integ, posit)'''
 
         # https://www.machinelearningplus.com/python/parallel-processing-python/

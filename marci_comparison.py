@@ -7,7 +7,7 @@ from pyuvs import swath_number
 import math
 
 # Set the orbit info
-orbit = 3453
+orbit = 7300
 orbit_code = f'orbit' + f'{orbit}'.zfill(5)
 block = math.floor(orbit / 100) * 100
 orbit_block = 'orbit' + f'{block}'.zfill(5)
@@ -16,12 +16,16 @@ orbit_block = 'orbit' + f'{block}'.zfill(5)
 spice_path = Path('/media/kyle/McDataFace/spice')
 s = Spice(spice_path)
 s.load_spice()
-orbits, all_et = s.find_all_maven_apsis_et('apoapse', endtime=datetime(2022, 5, 29))
+orbits, all_et = s.find_all_maven_apsis_et('apoapse', endtime=datetime(2022, 9, 4))
+
 
 print('found apsis info')
 et = all_et[orbits == orbit][0]
 pf = PositionFinder(et)
 dt = pf.get_datetime()
+print(dt)
+
+raise SystemExit(9)
 
 # Get the relevant MARCI file
 doy = f'{dt.timetuple().tm_yday}'.zfill(3)
